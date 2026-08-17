@@ -6,7 +6,10 @@
 import type { ReactNode } from "react";
 import {
     BookOpen,
+    CircleUserRound,
+    Cog,
     Feather,
+    Filter,
     Flame,
     GlassWater,
     Music4,
@@ -15,11 +18,12 @@ import {
     UserRound,
 } from "lucide-react";
 import type { MixCharacterCard, MixMaterial, MixMaterialKind } from "@/lib/mixology/types";
-import { MIX_KIND_LABELS, mixEncoreRenderHtml, mixKindHasCover } from "@/lib/mixology/types";
+import { MIX_DOCK_LABELS, MIX_KIND_LABELS, mixEncoreRenderHtml, mixKindHasCover, mixKindRunsActiveCode } from "@/lib/mixology/types";
 import { MixRichText } from "./rich-text";
 
 const KIND_ICONS: Record<MixMaterialKind, typeof UserRound> = {
     character: UserRound,
+    persona: CircleUserRound,
     base: BookOpen,
     flavor: Feather,
     glass: GlassWater,
@@ -27,11 +31,27 @@ const KIND_ICONS: Record<MixMaterialKind, typeof UserRound> = {
     ticket: ReceiptText,
     garnish: Sparkles,
     encore: Music4,
+    filter: Filter,
+    mechanism: Cog,
 };
 
 export function KindGlyph({ kind, size = 26 }: { kind: MixMaterialKind; size?: number }) {
     const Icon = KIND_ICONS[kind];
     return <Icon size={size} strokeWidth={1.6} />;
+}
+
+/**
+ * 作者小头像：没有头像就用名字首字的圆片。线上详情、酒柜详情、创作者资料入口共用。
+ * name 必须传"旁边实际显示的那个名字"（自己没起笔名就是「我」，别人没署名就是「匿名调酒师」），
+ * 圆片里的字才不会和名字对不上。
+ */
+export function AuthorAvatar({ name, avatar, size = 32 }: { name?: string; avatar?: string; size?: number }) {
+    const display = (name ?? "").trim() || "我";
+    if (avatar) {
+        // eslint-disable-next-line @next/next/no-img-element
+        return <img className="mix-avatar" src={avatar} alt={display} style={{ width: size, height: size }} />;
+    }
+    return <span className="mix-avatar-fallback" style={{ width: size, height: size, fontSize: Math.round(size * 0.48) }}>{display.slice(0, 1)}</span>;
 }
 
 export function formatMixTime(ts: number): string {
@@ -89,6 +109,8 @@ export function MatCard({
                 <div className="mix-mat-name">
                     <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>{name}</span>
                     {badge ? <span className="mix-mat-badge">{badge}</span> : null}
+                    {/* 带可执行逻辑的种类：点开之前就让人看见 */}
+                    {mixKindRunsActiveCode(kind) ? <span className="mix-mat-badge" data-tone="code">含可执行逻辑</span> : null}
                 </div>
                 {hook ? <div className="mix-mat-hook">{hook}</div> : null}
                 {author || stats ? (
@@ -177,6 +199,15 @@ export function MaterialDetail({ material }: { material: MixMaterial }) {
             </>
         );
     }
+    if (material.kind === "persona") {
+        return (
+            <>
+                <DetailField label="一句话介绍" value={material.hook} />
+                <DetailField label="代入名" value={material.userName} />
+                <DetailField label="用户人设" value={material.content} />
+            </>
+        );
+    }
     if (material.kind === "ticket") {
         return (
             <>
@@ -200,6 +231,30 @@ export function MaterialDetail({ material }: { material: MixMaterial }) {
                 <DetailField label="一句话介绍" value={material.hook} />
                 <DetailField label="输出契约" value={material.contract} />
                 <DetailField label="渲染代码" value={mixEncoreRenderHtml(material)} code />
+            </>
+        );
+    }
+    if (material.kind === "filter") {
+        return (
+            <>
+                <DetailField label="一句话介绍" value={material.hook} />
+                <DetailField
+                    label={`清洗规则 · ${material.rules.length} 条`}
+                    value={material.rules
+                        .map((r, i) => `${i + 1}.（${r.mode === "display" ? "仅显示" : "进上下文"}）/${r.find}/ → ${r.replace || "（删除）"}`)
+                        .join("\n")}
+                    code
+                />
+            </>
+        );
+    }
+    if (material.kind === "mechanism") {
+        return (
+            <>
+                <DetailField label="一句话介绍" value={material.hook} />
+                <DetailField label="钩子逻辑" value={material.script} code />
+                {material.dock ? <DetailField label="常驻界面" value={`停靠在${MIX_DOCK_LABELS[material.dock]}`} /> : null}
+                <DetailField label="界面代码" value={material.panelHtml} code />
             </>
         );
     }
