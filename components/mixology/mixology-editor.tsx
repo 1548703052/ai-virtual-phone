@@ -3,8 +3,9 @@
 // 独家特调 · 材料编辑器：八类材料的自建/编辑表单（底部弹层里渲染）。
 // Phase ③ 先给够用的表单闭环，创作工坊阶段再上专业编辑体验。
 
-import { useMemo, useRef, useState, type ReactNode } from "react";
-import { FileText, Plus, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { BookOpen, FileText, Plus, Trash2 } from "lucide-react";
 import type {
     MixCharacterCard,
     MixFilterRule,
@@ -13,9 +14,9 @@ import type {
     MixTextMaterial,
     MixTicketVar,
 } from "@/lib/mixology/types";
-import { createMixId, formatMixTags, MIX_KIND_LABELS, MIX_PANEL_DEFAULT_LAYOUT, MIX_TAG_MAX, mixKindHasCover, mixPanelLayoutOf, parseMixTags } from "@/lib/mixology/types";
+import { createMixId, formatMixTags, MIX_KIND_LABELS, MIX_PANEL_DEFAULT_LAYOUT, MIX_SECTION_TITLE_DEFAULTS, MIX_TAG_MAX, mixPanelLayoutOf, parseMixTags, type MixSectionTitleKey } from "@/lib/mixology/types";
 import { applyMixFilterRules } from "@/lib/mixology/prose";
-import { MixPreviewInline, MixStructureSheet } from "./mixology-preview";
+import { MixCraftSheet, MixPreviewInline, MixStructureSheet } from "./mixology-preview";
 
 const OPENING_SEPARATOR = "\n---\n";
 
@@ -28,6 +29,10 @@ const KIND_GUIDE: Record<MixMaterialKind, { what: string; where: string }> = {
     persona: {
         what: "这里写用户人设：{{user}} 是谁——身份、性格、外貌，以及与{{char}}之间那段关系里你这一侧的设定。",
         where: "进入「用户资料」段；填了名字就替换全部 {{user}}。",
+    },
+    preface: {
+        what: "这里写序言：整份提示词的第一段话，声明这是角色扮演、模型该以什么姿态读后面的内容。开场直接影响全局文风；建议保留一句「越靠后的要求优先级越高」之类的优先级声明。",
+        where: "进入提示词最顶端（扮演总纲之前）；一局只用一件，不配则提示词没有这一段。",
     },
     base: {
         what: "这里写扮演总纲：如何入戏、能否代替玩家发言、是否允许冲突与负面情绪。约束态度，不涉及文笔。",
@@ -75,8 +80,12 @@ const KIND_GUIDE: Record<MixMaterialKind, { what: string; where: string }> = {
 const HEADING_NOTE = "要在框里加小标题，用 ### 开头（# 和 ## 已被应用占用）。";
 const HEADING_NOTE_KINDS: MixMaterialKind[] = ["character", "persona", "base", "flavor", "glass", "strength", "ticket", "encore"];
 
-/** 文本类材料（基底/风味/杯型/苦精）的字段名与示例 */
-const TEXT_FIELD_COPY: Record<"base" | "flavor" | "glass" | "strength", { label: string; placeholder: string }> = {
+/** 文本类材料（序言/基底/风味/杯型/苦精）的字段名与示例 */
+const TEXT_FIELD_COPY: Record<"preface" | "base" | "flavor" | "glass" | "strength", { label: string; placeholder: string }> = {
+    preface: {
+        label: "序言",
+        placeholder: "例：\n这是一场沉浸式角色扮演，你要扮演的角色是{{char}}。下方依次给出扮演规则、角色资料与输出要求，请全部遵守；越靠后的要求优先级越高。\n（建议保留一句优先级声明，应用的段落排序依赖它。）",
+    },
     base: {
         label: "扮演总纲",
         placeholder: "例：\n你将完全成为{{char}}，以第一视角活在故事里。\n- 绝不跳出角色，绝不以 AI 自称。\n- 绝不代替{{user}}说话或做决定。\n- 允许出现冲突、拒绝与负面情绪，贴合人设比讨好{{user}}更重要。",
@@ -165,11 +174,19 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
     const [content, setContent] = useState(
         initial && "content" in initial ? (initial as MixTextMaterial).content : "",
     );
+    // 仅序言：各分段标题的覆写（留空的键用默认标题）
+    const [sectionTitles, setSectionTitles] = useState<Partial<Record<MixSectionTitleKey, string>>>(
+        initial?.kind === "preface" ? { ...(initial as MixTextMaterial).sectionTitles } : {},
+    );
     const [personaUserName, setPersonaUserName] = useState(initial?.kind === "persona" ? initial.userName ?? "" : "");
     const [contract, setContract] = useState(initial?.kind === "ticket" ? initial.contract : "");
     const [renderHtml, setRenderHtml] = useState(initial?.kind === "ticket" ? initial.renderHtml : "");
     const [previewRaw, setPreviewRaw] = useState(initial?.kind === "ticket" ? initial.previewRaw ?? "" : "");
     const [vars, setVars] = useState<MixTicketVar[]>(initial?.kind === "ticket" ? initial.vars ?? [] : []);
+    // 历史回传（小票/尾调共用）：往期轮次的壳内原文要不要回传给模型
+    const [historyFeed, setHistoryFeed] = useState<"latest" | "all" | "none">(
+        (initial?.kind === "ticket" || initial?.kind === "encore") ? initial.historyFeed ?? "latest" : "latest",
+    );
     const [script, setScript] = useState(initial?.kind === "mechanism" ? initial.script ?? "" : "");
     // 摆放不进表单：界面代码里用 mix.move / mix.size / mix.chrome … 自己定。
     // 老材料带着的那份原样保留，免得改一次名字就把人家摆好的位置抹了。
@@ -215,6 +232,16 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
     }, [rules, filterSample]);
     const [error, setError] = useState("");
     const [structureOpen, setStructureOpen] = useState(false);
+    const [craftOpen, setCraftOpen] = useState(false);
+    // 弹层宿主：编辑器自己就在一个可滚动的底部弹层里，mask 的 absolute/inset:0
+    // 若就地渲染会锚到滚动内容上——往下拉能把编辑器的输入栏一起拉出来。
+    // 与大厅同一个做法：portal 到应用根层去铺满整个画面。
+    const [overlayHost, setOverlayHost] = useState<HTMLElement | null>(null);
+    useEffect(() => { setOverlayHost(document.querySelector<HTMLElement>(".mixology-app")); }, []);
+    // 对局画面（.mix-game）是 z-index:45 的全屏层，速查弹层的 mask 自身只有 40：
+    // 从对局内的编辑器打开会整个被压在画面底下，按钮看着像没反应。套一层
+    // z-index:50 的定位容器抬到对局之上、toast(60)/确认弹窗(70)之下。
+    const inOverlay = (node: ReactNode) => (overlayHost ? createPortal(<div className="mix-overlay-raise">{node}</div>, overlayHost) : null);
     const fileRef = useRef<HTMLInputElement | null>(null);
 
     // 标签：输入的时候就按最终口径拆好给作者看，免得存下来才发现被掐了
@@ -245,7 +272,8 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
             hook: hook.trim() || undefined,
             author: initial?.author,
             tags: tags.length ? tags : undefined,
-            cover: cover || undefined,
+            // 只有角色卡收封面：其余种类连老材料残留的 cover 也在这一步洗掉
+            cover: isCharacter ? cover || undefined : undefined,
             createdAt: initial?.createdAt ?? Date.now(),
             updatedAt: Date.now(),
         };
@@ -287,7 +315,7 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
             const cleanVars = vars
                 .map((v) => ({ name: v.name.trim(), initial: v.initial?.trim() || undefined }))
                 .filter((v, i, all) => v.name && all.findIndex((x) => x.name === v.name) === i);
-            onSave({ ...meta, kind: "ticket", contract: contract.trim(), renderHtml, previewRaw: previewRaw.trim() || undefined, vars: cleanVars.length ? cleanVars : undefined });
+            onSave({ ...meta, kind: "ticket", contract: contract.trim(), renderHtml, previewRaw: previewRaw.trim() || undefined, vars: cleanVars.length ? cleanVars : undefined, historyFeed: historyFeed !== "latest" ? historyFeed : undefined });
             return;
         }
         if (kind === "mechanism") {
@@ -320,6 +348,7 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
                 contract: encoreContract.trim() || undefined,
                 renderHtml: html,
                 previewRaw: encorePreviewRaw.trim() || undefined,
+                historyFeed: historyFeed !== "latest" ? historyFeed : undefined,
             });
             return;
         }
@@ -351,7 +380,20 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
             setError(`${MIX_KIND_LABELS[kind]}的内容不能为空。`);
             return;
         }
-        onSave({ ...meta, kind, content: content.trim() } as MixTextMaterial);
+        // 序言的标题覆写：只存写了内容的键，一项都没写就不带这个字段
+        let cleanedTitles: Partial<Record<MixSectionTitleKey, string>> | undefined;
+        if (kind === "preface") {
+            const entries = (Object.keys(MIX_SECTION_TITLE_DEFAULTS) as MixSectionTitleKey[])
+                .map((key) => [key, (sectionTitles[key] ?? "").replace(/\s+/g, " ").trim()] as const)
+                .filter(([, value]) => value);
+            cleanedTitles = entries.length ? Object.fromEntries(entries) : undefined;
+        }
+        onSave({
+            ...meta,
+            kind,
+            content: content.trim(),
+            ...(kind === "preface" ? { sectionTitles: cleanedTitles } : {}),
+        } as MixTextMaterial);
     };
 
     const guide = KIND_GUIDE[kind];
@@ -362,10 +404,17 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
                 <div className="mix-guide-what">{guide.what}</div>
                 <div className="mix-guide-where">{guide.where}</div>
                 {HEADING_NOTE_KINDS.includes(kind) ? <div className="mix-guide-level">{HEADING_NOTE}</div> : null}
-                <button type="button" className="mix-guide-link" onClick={() => setStructureOpen(true)}>
-                    <FileText size={12} />
-                    <span>看看完整提示词结构</span>
-                </button>
+                {/* 两个等宽按钮占满一排：左边看结构（写的东西落在哪），右边看做法（怎么让 AI 代工） */}
+                <div className="mix-guide-actions">
+                    <button type="button" className="mix-guide-btn" onClick={() => setStructureOpen(true)}>
+                        <FileText size={14} />
+                        <span>提示词结构</span>
+                    </button>
+                    <button type="button" className="mix-guide-btn" onClick={() => setCraftOpen(true)}>
+                        <BookOpen size={14} />
+                        <span>发给 AI 的制作说明</span>
+                    </button>
+                </div>
             </div>
             <Field label={isCharacter ? "角色名" : "名称"} hint="必填">
                 <input className="mix-input" value={name} onChange={(e) => setName(e.target.value)} placeholder={isCharacter ? "角色叫什么，就是提示词里的 {{char}}" : `给这件${MIX_KIND_LABELS[kind]}起个名，方便自己在吧台认出来`} />
@@ -391,8 +440,10 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
                     <div className="mix-form-note">超出 {MIX_TAG_MAX} 个的标签不会保存，已多写 {tagsDropped} 个。</div>
                 ) : null}
             </Field>
-            {mixKindHasCover(kind) ? (
-                <Field label="封面图" hint={isCharacter ? "对局背景，强烈建议配" : undefined}>
+            {/* 封面只有角色卡收：小票/装饰/尾调的列表封面由渲染效果自动生成，
+                材料长什么样让代码自己说，也省一趟图片上传 */}
+            {isCharacter ? (
+                <Field label="封面图" hint="对局背景，强烈建议配">
                     <div className="mix-cover-picker">
                         {cover ? (
                             // eslint-disable-next-line @next/next/no-img-element
@@ -514,7 +565,7 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
                     </Field>
                 </>
             ) : null}
-            {kind === "base" || kind === "flavor" || kind === "glass" || kind === "strength" ? (
+            {kind === "preface" || kind === "base" || kind === "flavor" || kind === "glass" || kind === "strength" ? (
                 <Field label={TEXT_FIELD_COPY[kind].label} hint="必填，可用 {{char}} / {{user}}">
                     <textarea
                         className="mix-textarea"
@@ -525,6 +576,21 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
                     />
                 </Field>
             ) : null}
+            {kind === "preface" ? (
+                <Field label="自定义分段标题" hint="选填，让各段标题的措辞贴合序言的基调；留空的用默认。提示词里的交叉引用会跟着换">
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                        {(Object.keys(MIX_SECTION_TITLE_DEFAULTS) as MixSectionTitleKey[]).map((key) => (
+                            <input
+                                key={key}
+                                className="mix-input"
+                                value={sectionTitles[key] ?? ""}
+                                placeholder={MIX_SECTION_TITLE_DEFAULTS[key]}
+                                onChange={(e) => setSectionTitles((prev) => ({ ...prev, [key]: e.target.value }))}
+                            />
+                        ))}
+                    </div>
+                </Field>
+            ) : null}
             {kind === "ticket" ? (
                 <>
                     <Field label="输出契约" hint="必填，告诉 AI 每轮报哪些数据、按什么格式报">
@@ -533,7 +599,7 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
                             style={{ minHeight: 130 }}
                             value={contract}
                             onChange={(e) => setContract(e.target.value)}
-                            placeholder={"例：\n每轮结束后报告下面三行，每行一个字段：\n好感度: 0-100 的整数\n心情: 四个字以内\n此刻在想: 一句话"}
+                            placeholder={"例：\n每轮按下面的分组逐行报告，键名不变：\n【核心】\n好感度: 0-100 整数，括号里注变化与原因，如 62（+3，替我挡了酒）\n关系阶段: 陌生/试探/靠近/纠缠 之一\n【他此刻】\n动作神态: 带细节的完整句，写到小动作\n衣着: 具体到单品与状态\n内心OS: 第一人称一句，20~40 字，可带吐槽\n【小节】\n今日流言: 两三句成段的八卦或传闻"}
                         />
                     </Field>
                     <Field label="渲染代码" hint="必填，HTML+CSS+JS，把上面那段原文画成卡片">
@@ -554,6 +620,13 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
                             onChange={(e) => setPreviewRaw(e.target.value)}
                             placeholder={"照着上面的契约编一份，例：\n好感度: 62\n心情: 嘴硬\n此刻在想: 想留你再坐一会"}
                         />
+                    </Field>
+                    <Field label="历史回传" hint="往期轮次的壳内原文要不要回传给 AI；默认只回传最近一轮——状态接续和格式示范都够用，长局不费 token">
+                        <div className="mix-feed-seg">
+                            <button type="button" data-on={historyFeed === "none" ? "true" : undefined} onClick={() => setHistoryFeed("none")}>不回传</button>
+                            <button type="button" data-on={historyFeed === "latest" ? "true" : undefined} onClick={() => setHistoryFeed("latest")}>只最近一轮（默认）</button>
+                            <button type="button" data-on={historyFeed === "all" ? "true" : undefined} onClick={() => setHistoryFeed("all")}>全部轮次</button>
+                        </div>
                     </Field>
                     <Field label="要记住的项" hint="记住的值会一路留着，可以拿来设材料的「什么时候出现」；抽不到时保留上一轮的值">
                         {contractFieldNames.length ? (
@@ -683,8 +756,15 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
                             style={{ minHeight: 110 }}
                             value={encoreContract}
                             onChange={(e) => setEncoreContract(e.target.value)}
-                            placeholder={"告诉 AI 何时输出、写什么。例：\n仅在剧情出现明显进展或情绪转折时输出：以旁观视角（助理、监控、朋友圈动态等）写一段不超过 80 字的小剧场，第一行标注视角。平淡回合整段省略。"}
+                            placeholder={"告诉 AI 写什么、按什么格式写；小剧场默认每轮都演。例：\n每轮以他朋友圈最新一条动态收尾：第一行「配图」用文字描述画面，第二行正文文案（口吻贴人设），随后一行点赞数，再盖至少 5 条评论楼——各有人名与口吻、有来有回可以歪楼拌嘴，其中一条是盖楼回复。整块十来行、两三百字起步，像一篇完整的帖子，不要三五行敷衍。"}
                         />
+                    </Field>
+                    <Field label="历史回传" hint="往期轮次的壳内原文要不要回传给 AI；默认只回传最近一轮——格式示范够用，长局不费 token">
+                        <div className="mix-feed-seg">
+                            <button type="button" data-on={historyFeed === "none" ? "true" : undefined} onClick={() => setHistoryFeed("none")}>不回传</button>
+                            <button type="button" data-on={historyFeed === "latest" ? "true" : undefined} onClick={() => setHistoryFeed("latest")}>只最近一轮（默认）</button>
+                            <button type="button" data-on={historyFeed === "all" ? "true" : undefined} onClick={() => setHistoryFeed("all")}>全部轮次</button>
+                        </div>
                     </Field>
                     <Field label="渲染代码" hint="必填，HTML/JS；AI 输出经 {{RAW}} 或 window.ENCORE_RAW 注入，静态小品则直接展示">
                         <textarea
@@ -771,7 +851,8 @@ export function MixMaterialEditor({ kind, initial, onSave, onCancel }: EditorPro
                     </Field>
                 </>
             ) : null}
-            {structureOpen ? <MixStructureSheet highlight={kind} onClose={() => setStructureOpen(false)} /> : null}
+            {structureOpen ? inOverlay(<MixStructureSheet highlight={kind} onClose={() => setStructureOpen(false)} />) : null}
+            {craftOpen ? inOverlay(<MixCraftSheet kind={kind} onClose={() => setCraftOpen(false)} />) : null}
             {error ? <div style={{ color: "#e2a3a3", fontSize: 12, marginTop: 12 }}>{error}</div> : null}
             <div className="mix-form-footer">
                 <button type="button" className="mix-ghost-btn" onClick={onCancel}>取消</button>

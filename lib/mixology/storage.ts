@@ -15,8 +15,10 @@ import { MIX_SLOT_ORDER, mixSlotEntries, normalizeMixSlots } from "./types";
 import {
     MIX_BUILTIN_BASE_ID,
     MIX_BUILTIN_GLASS_ID,
+    MIX_BUILTIN_PREFACE_ID,
     createBuiltinBase,
     createBuiltinGlass,
+    createBuiltinPreface,
 } from "./builtin";
 
 const CABINET_KEY = "mixology_cabinet_v1";
@@ -31,8 +33,15 @@ registerKvMigration(SESSIONS_KEY);
 registerKvMigration(BUILTIN_VERSION_KEY);
 registerKvMigration(PROFILE_KEY);
 
+/**
+ * 酒柜被外部改写（小卷工具）后的广播事件：已打开的特调 App 据此重读列表。
+ * App 自己的操作不用它——那些路径本来就会调 refresh。
+ */
+export const MIX_CABINET_UPDATED_EVENT = "mix-cabinet-updated";
+
 /** 官方件不可删除、不可改名（内容永远是当前出厂版） */
 export const MIX_BUILTIN_IDS: readonly string[] = [
+    MIX_BUILTIN_PREFACE_ID,
     MIX_BUILTIN_BASE_ID,
     MIX_BUILTIN_GLASS_ID,
 ];
@@ -43,7 +52,7 @@ export function isMixBuiltinId(id: string): boolean {
 
 /** 出厂件工厂直读：不落库，每次现造，天然随版本更新 */
 export function listMixBuiltins(kind?: MixMaterialKind): MixMaterial[] {
-    const factory: MixMaterial[] = [createBuiltinBase(), createBuiltinGlass()];
+    const factory: MixMaterial[] = [createBuiltinPreface(), createBuiltinBase(), createBuiltinGlass()];
     return kind ? factory.filter((m) => m.kind === kind) : factory;
 }
 
@@ -123,6 +132,9 @@ export function saveMixMaterial(material: MixMaterial): void {
     const list = loadMixCabinet();
     const idx = list.findIndex((m) => m.id === material.id);
     const stamped = { ...material, updatedAt: Date.now() };
+    // 只有角色卡收封面：其余种类的列表海报由渲染缩样自动生成，
+    // 老材料/导入文件残留的 cover 在落库这道总闸口洗掉，不再跟着材料到处走
+    if (stamped.kind !== "character") delete (stamped as { cover?: string }).cover;
     if (idx >= 0) list[idx] = stamped;
     else list.push(stamped);
     writeJson(CABINET_KEY, list);
